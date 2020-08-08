@@ -8,7 +8,7 @@ from preprocess import processor_BAMI2
 from utils import get_latest_model, bpm_absolute_error
 
 timesteps = 6
-model_name = 'baseline'
+model_name = 'v2-rc1'
 test_batch_size = 1024
 
 

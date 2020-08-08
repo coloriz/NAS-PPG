@@ -4,11 +4,12 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import Input, Model
 from tensorflow.keras.callbacks import TensorBoard, ModelCheckpoint
-from tensorflow.keras.layers import Concatenate, Conv2D, Dense, Dropout, Flatten, LeakyReLU, LSTM, MaxPooling2D, Softmax, TimeDistributed
+from tensorflow.keras.layers import BatchNormalization, Conv1D, Flatten, LeakyReLU, LSTM, Softmax, TimeDistributed
 from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.metrics import CategoricalAccuracy
 from tensorflow.keras.models import load_model
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import L2
 
 from utils import get_latest_model, bpm_absolute_error
 
@@ -17,34 +18,21 @@ train_batch_size = 1
 validation_batch_size = 1024
 epochs = 10000
 lr = 0.0001
-model_name = 'baseline'
+model_name = 'v2-rc1'
 
 
 def build_model():
-    two_power_spectra = Input(shape=(timesteps, 2, 222, 1), name='Two_Power_Spectra')
-    acc_intensity = Input(shape=(timesteps, 1), name='Acc_intensity')
-    x = TimeDistributed(Conv2D(32, (2, 37), 4, 'same', name='Conv1'), name='TD_Conv1')(two_power_spectra)
+    two_power_spectra = Input(shape=(timesteps, 222, 2), name='Two_Power_Spectra')
+    x = TimeDistributed(Conv1D(16, 11, 3, 'same', kernel_regularizer=L2(), name='Conv1'), name='TD_Conv1')(two_power_spectra)
+    x = BatchNormalization(name='BN1')(x)
     x = LeakyReLU(name='Leaky_ReLU1')(x)
-    x = TimeDistributed(MaxPooling2D((1, 2), name='Maxpooling1'), name='TD_Maxpooling1')(x)
-    x = TimeDistributed(Dropout(0.3, name='Dropout1'), name='TD_Dropout1')(x)
-
-    x = TimeDistributed(Conv2D(64, (1, 5), (1, 1), 'same', name='Conv2'), name='TD_Conv2')(x)
-    x = LeakyReLU(name='Leaky_ReLU2')(x)
-    x = TimeDistributed(MaxPooling2D((1, 2), name='Maxpooling2'), name='TD_Maxpooling2')(x)
-    x = TimeDistributed(Dropout(0.3, name='Dropout2'), name='TD_Dropout2')(x)
 
     x = TimeDistributed(Flatten(name='Flatten'), name='TD_Flatten')(x)
-    x = Dense(512, name='FC1')(x)
-    x = LeakyReLU(name='Leaky_ReLU3')(x)
 
-    x = Concatenate(name='Concatenate')([x, acc_intensity])
-    x = LSTM(512, dropout=0.3, recurrent_dropout=0.2, return_sequences=True, name='LSTM1')(x)
-    x = LSTM(222, dropout=0.3, recurrent_dropout=0.2, name='LSTM2')(x)
-
-    x = Dense(222, name='FC2')(x)
+    x = LSTM(222, kernel_regularizer=L2(), recurrent_regularizer=L2(), name='LSTM1')(x)
     y = Softmax(name='Softmax')(x)
 
-    return Model(inputs=[two_power_spectra, acc_intensity], outputs=y, name=model_name)
+    return Model(inputs=two_power_spectra, outputs=y, name=model_name)
 
 
 def train():
@@ -56,40 +44,38 @@ def train():
 
     def generate_train_sample(timesteps: int):
         for s in subjects_train:
-            PS, PA, Ia, y_true = s['PS'], s['PA'], s['Ia'], s['y_true']
+            PS, PA, y_true = s['PS'], s['PA'], s['y_true']
             for i in range(0, len(PS) - timesteps + 1):
-                PS_i_series = PS[i:i + timesteps, ..., np.newaxis]
-                PA_i_series = PA[i:i + timesteps, ..., np.newaxis]
-                Ia_i_series = Ia[i:i + timesteps, ..., np.newaxis]
+                PS_i_series = PS[i:i + timesteps]
+                PA_i_series = PA[i:i + timesteps]
                 y = y_true[i + timesteps - 1]
 
-                two_ps = np.stack((PS_i_series, PA_i_series), axis=1)
+                two_ps = np.stack((PS_i_series, PA_i_series), axis=-1)
 
-                yield {'Two_Power_Spectra': two_ps, 'Acc_intensity': Ia_i_series}, y
+                yield two_ps, y
 
     def generate_validation_sample(timesteps: int):
         for s in subjects_validation:
-            PS, PA, Ia, y_true = s['PS'], s['PA'], s['Ia'], s['y_true']
+            PS, PA, y_true = s['PS'], s['PA'], s['y_true']
             for i in range(0, len(PS) - timesteps + 1):
-                PS_i_series = PS[i:i + timesteps, ..., np.newaxis]
-                PA_i_series = PA[i:i + timesteps, ..., np.newaxis]
-                Ia_i_series = Ia[i:i + timesteps, ..., np.newaxis]
+                PS_i_series = PS[i:i + timesteps]
+                PA_i_series = PA[i:i + timesteps]
                 y = y_true[i + timesteps - 1]
 
-                two_ps = np.stack((PS_i_series, PA_i_series), axis=1)
+                two_ps = np.stack((PS_i_series, PA_i_series), axis=-1)
 
-                yield {'Two_Power_Spectra': two_ps, 'Acc_intensity': Ia_i_series}, y
+                yield two_ps, y
 
     dataset_train = tf.data.Dataset.from_generator(
         generate_train_sample, args=[timesteps],
-        output_types=({'Two_Power_Spectra': tf.float32, 'Acc_intensity': tf.float32}, tf.float32),
-        output_shapes=({'Two_Power_Spectra': (timesteps, 2, 222, 1), 'Acc_intensity': (timesteps, 1)}, (222,))
+        output_types=(tf.float32, tf.float32),
+        output_shapes=((timesteps, 222, 2), (222,))
     ).shuffle(2 ** 14).batch(train_batch_size)
 
     dataset_validation = tf.data.Dataset.from_generator(
         generate_validation_sample, args=[timesteps],
-        output_types=({'Two_Power_Spectra': tf.float32, 'Acc_intensity': tf.float32}, tf.float32),
-        output_shapes=({'Two_Power_Spectra': (timesteps, 2, 222, 1), 'Acc_intensity': (timesteps, 1)}, (222,))
+        output_types=(tf.float32, tf.float32),
+        output_shapes=((timesteps, 222, 2), (222,))
     ).batch(validation_batch_size)
 
     # Check if there is a model
